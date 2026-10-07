@@ -221,6 +221,65 @@ export async function mediaFileTarget(media: ItemMedia, variant: 'raw' | 'thumb'
 
 export { enqueue };
 
+/**
+ * 失败可重试：把处理失败（或疑似卡在 processing）的媒体重新入队。
+ * 幂等：同一条媒体已有 queued/running 的对应任务时直接复用，不产生重复任务。
+ * 产物 key 全部按 sha256 内容寻址，重新处理只是覆盖写同一份字节，无副作用。
+ */
+export async function reprocessMedia(
+  userId: string,
+  ctx: FamilyContext,
+  mediaId: string,
+  meta: ActorMeta,
+) {
+  const media = await loadMediaForUser(userId, ctx, mediaId);
+  const { access } = await itemWithAccess(userId, ctx, media.itemId);
+  if (!access.canManageMedia) throw new AppError('FORBIDDEN', '没有权限操作该媒体');
+
+  const jobType = media.kind === 'audio' ? 'media_waveform' : 'media_thumbnail';
+  const { job, media: updated } = await prisma.$transaction(async (tx) => {
+    // JSON 精确匹配 payload->>'mediaId'，只去重同一条媒体的同类型任务
+    const pendingJobs = await tx.job.findMany({
+      where: { familyId: ctx.familyId, type: jobType, status: { in: ['queued', 'running'] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    const activeJob = pendingJobs.find((j) => (j.payload as { mediaId?: string } | null)?.mediaId === mediaId) ?? null;
+
+    const next = await tx.itemMedia.update({
+      where: { id: mediaId },
+      data: { status: 'processing', lastError: null },
+    });
+
+    if (!activeJob) {
+      const created = await tx.job.create({
+        data: {
+          familyId: ctx.familyId,
+          type: jobType,
+          // 重试重新获得完整的 maxAttempts 次数，而不是沿用旧计数
+          attempts: 0,
+          payload: { mediaId } as never,
+        },
+      });
+      await audit.record(
+        {
+          familyId: ctx.familyId,
+          actorId: userId,
+          action: 'media.reprocess',
+          targetType: 'item',
+          targetId: media.itemId,
+          diff: { mediaId, kind: media.kind } as never,
+          ...meta,
+        },
+        tx,
+      );
+      return { job: created, media: next };
+    }
+    return { job: activeJob, media: next };
+  });
+
+  return { media: toMediaDto(updated, ctx.familyId), jobId: job.id };
+}
+
 export function makeTmpPath(ext: string): string {
   return path.join(tmpDir(), `proc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}${ext}`);
 }

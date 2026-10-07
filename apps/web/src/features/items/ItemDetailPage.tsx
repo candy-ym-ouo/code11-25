@@ -29,6 +29,9 @@ export function ItemDetailPage() {
     queryKey: ['item', fid, itemId],
     queryFn: () => api.get<{ item: ItemDetail }>(`/families/${fid}/items/${itemId}`),
     enabled: Boolean(fid && itemId),
+    // 有媒体还在处理中（包括崩溃后被 worker 重新入队的）时持续轮询，处理完自动停止转圈
+    refetchInterval: (q) =>
+      q.state.data?.item.media.some((m) => m.status === 'processing') ? 3000 : false,
   });
 
   const invalidate = async () => {
@@ -169,7 +172,7 @@ export function ItemDetailPage() {
               <h2 style={{ marginBottom: 'var(--space-3)' }}>录音（{audios.length}）</h2>
               <div className="stack">
                 {audios.map((m) => (
-                  <AudioPlayer key={m.id} media={m} />
+                  <AudioPlayer key={m.id} media={m} fid={fid} onChanged={() => void invalidate()} />
                 ))}
               </div>
             </section>

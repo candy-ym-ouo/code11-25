@@ -19,6 +19,16 @@ export interface ActorMeta {
 }
 
 export async function createExportJob(userId: string, ctx: FamilyContext, meta: ActorMeta) {
+  // 幂等去重：已有排队/执行中的导出任务时直接复用，重复点击「开始导出」不产生第二个 ZIP。
+  // 已失败的任务不在这里复用（失败是终态，重试应当显式发起一次新任务）。
+  const existing = await prisma.job.findFirst({
+    where: { familyId: ctx.familyId, type: 'export_build', status: { in: ['queued', 'running'] } },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (existing) {
+    return { jobId: existing.id, status: existing.status, deduplicated: true };
+  }
+
   const job = await prisma.$transaction(async (tx) => {
     const created = await tx.job.create({
       data: {
@@ -40,7 +50,7 @@ export async function createExportJob(userId: string, ctx: FamilyContext, meta: 
     );
     return created;
   });
-  return { jobId: job.id, status: job.status };
+  return { jobId: job.id, status: job.status, deduplicated: false };
 }
 
 export async function getExportJob(familyId: string, jobId: string) {
@@ -62,6 +72,10 @@ export function exportZipPath(familyId: string, jobId: string): string {
   return path.join(config.EXPORT_ROOT, familyId, `${jobId}.zip`);
 }
 
+function exportPartPath(familyId: string, jobId: string): string {
+  return path.join(config.EXPORT_ROOT, familyId, `${jobId}.zip.part-${process.pid}`);
+}
+
 function csvCell(value: unknown): string {
   const s = value === null || value === undefined ? '' : String(value);
   return `"${s.replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
@@ -71,8 +85,15 @@ function csvCell(value: unknown): string {
  * 生成全量导出包。产物结构与项目文档 6.9 一致：
  * manifest.json + items.csv + items/*.md + media/原始文件 + media/index.csv，
  * 每份 media 都带 sha256，离线也能校验完整性。
+ *
+ * 幂等性：先写 <jobId>.zip.part-<pid> 临时文件，成功后原子 rename；
+ * 任务被中断后重试只会留下一个待 GC 的临时包，永远不会覆盖/损坏已有的完成包。
+ * 同一任务重复执行产出的内容等价（以 jobId 为产物名）。
  */
-export async function buildExportZip(job: Job): Promise<{ file: string; items: number; media: number; bytes: number }> {
+export async function buildExportZip(
+  job: Job,
+  onProgress?: (progress: number) => Promise<void> | void,
+): Promise<{ file: string; items: number; media: number; bytes: number }> {
   const familyId = job.familyId;
   if (!familyId) throw new Error('导出任务缺少 familyId');
 
@@ -88,9 +109,10 @@ export async function buildExportZip(job: Job): Promise<{ file: string; items: n
   });
 
   const outPath = exportZipPath(familyId, job.id);
+  const partPath = exportPartPath(familyId, job.id);
   await fsp.mkdir(path.dirname(outPath), { recursive: true });
 
-  const output = fs.createWriteStream(outPath);
+  const output = fs.createWriteStream(partPath);
   const archive = archiver('zip', { zlib: { level: 6 } });
   const done = new Promise<void>((resolve, reject) => {
     output.on('close', () => resolve());
@@ -172,7 +194,7 @@ export async function buildExportZip(job: Job): Promise<{ file: string; items: n
 
     if (i % 25 === 0 || i === total - 1) {
       const progress = total === 0 ? 90 : Math.min(90, Math.round(((i + 1) / total) * 90));
-      await prisma.job.update({ where: { id: job.id }, data: { progress } }).catch(() => undefined);
+      await onProgress?.(progress);
     }
   }
 
@@ -216,8 +238,26 @@ export async function buildExportZip(job: Job): Promise<{ file: string; items: n
     { name: `${root}/manifest.json` },
   );
 
-  await archive.finalize();
-  await done;
+  try {
+    await archive.finalize();
+    await done;
+  } catch (err) {
+    // 主动 abort 避免句柄泄漏；临时包立刻删掉，不把失败重试的垃圾留给磁盘
+    archive.abort();
+    await fsp.rm(partPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+
+  // 整个 ZIP 完整落盘后再原子换名：下载方永远拿不到半截压缩包，重试也不会覆盖已完成的包
+  try {
+    await fsp.rename(partPath, outPath);
+  } catch (err) {
+    // 极端情况下 part 与目标跨设备（配置变更过 EXPORT_ROOT 挂载点），退化为复制后删除
+    await fsp.copyFile(partPath, outPath).catch(() => {
+      throw err;
+    });
+    await fsp.rm(partPath, { force: true }).catch(() => undefined);
+  }
 
   const stat = await fsp.stat(outPath);
   logger.info({ jobId: job.id, items: items.length, media: mediaTotal, bytes: stat.size }, '导出包生成完成');

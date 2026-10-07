@@ -87,8 +87,13 @@ export function createApp() {
       checks.storage = 'fail';
     }
     try {
-      const lastJob = await prisma.job.findFirst({ orderBy: { updatedAt: 'desc' } });
-      const stuck = lastJob?.status === 'running' && Date.now() - lastJob.updatedAt.getTime() > 10 * 60_000;
+      // 与 worker 的僵尸任务判定保持同一阈值；只看 running 任务里心跳最旧的一个
+      const oldestRunning = await prisma.job.findFirst({
+        where: { status: 'running' },
+        orderBy: { updatedAt: 'asc' },
+      });
+      const stuck =
+        oldestRunning !== null && Date.now() - oldestRunning.updatedAt.getTime() > config.WORKER_STALE_MS;
       checks.worker = config.WORKER_ENABLED ? (stuck ? 'stalled' : 'ok') : 'disabled';
     } catch {
       checks.worker = 'fail';

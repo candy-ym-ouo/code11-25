@@ -3,11 +3,13 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchWaveform, mediaSrc } from '../../lib/media';
 import { formatDuration } from '../../lib/format';
 import type { Media } from '../../api/types';
+import { api, ApiError } from '../../api/client';
 import { Button, Tag } from '../../components/ui';
+import { useToast } from '../../components/Toast';
 
 const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5];
 
-export function AudioPlayer({ media }: { media: Media }) {
+export function AudioPlayer({ media, fid, onChanged }: { media: Media; fid?: string; onChanged?: () => void }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -15,6 +17,22 @@ export function AudioPlayer({ media }: { media: Media }) {
   const [duration, setDuration] = useState((media.durationMs ?? 0) / 1000);
   const [rate, setRate] = useState(1);
   const [showTranscript, setShowTranscript] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const { push } = useToast();
+
+  const reprocess = async () => {
+    if (!fid) return;
+    setRetrying(true);
+    try {
+      await api.post(`/families/${fid}/media/${media.id}/reprocess`);
+      push('已重新加入处理队列，稍后自动刷新', 'success');
+      onChanged?.();
+    } catch (err) {
+      push(err instanceof ApiError ? err.message : '重试失败', 'error');
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   const waveform = useQuery({
     queryKey: ['waveform', media.id],
@@ -85,6 +103,11 @@ export function AudioPlayer({ media }: { media: Media }) {
         </span>
         {media.status === 'processing' ? <Tag tone="warn">处理中</Tag> : null}
         {media.status === 'failed' ? <Tag tone="warn">处理失败（原始录音仍保留）</Tag> : null}
+        {fid && (media.status === 'failed' || media.status === 'processing') ? (
+          <Button size="sm" variant="ghost" loading={retrying} onClick={() => void reprocess()}>
+            {media.status === 'failed' ? '重试处理' : '重新入队'}
+          </Button>
+        ) : null}
       </div>
 
       {waveform.data?.peaks?.length ? (

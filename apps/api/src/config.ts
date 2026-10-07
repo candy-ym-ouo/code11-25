@@ -52,6 +52,10 @@ const envSchema = z.object({
 
   WORKER_ENABLED: boolish(true),
   WORKER_POLL_MS: z.coerce.number().int().min(200).default(2000),
+  /** 执行中的任务超过该时长（毫秒）没有心跳，即视为进程已死/僵死，重启后或定时巡检时自动重新入队 */
+  WORKER_STALE_MS: z.coerce.number().int().min(30_000).default(10 * 60_000),
+  /** 心跳与僵尸任务巡检间隔（毫秒），必须明显小于 WORKER_STALE_MS，避免误杀正常长任务 */
+  WORKER_HEARTBEAT_MS: z.coerce.number().int().min(5_000).default(30_000),
   TRASH_RETENTION_DAYS: z.coerce.number().int().min(1).default(30),
   EXPORT_RETENTION_DAYS: z.coerce.number().int().min(1).default(7),
 

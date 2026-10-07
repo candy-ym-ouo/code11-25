@@ -66,10 +66,21 @@ export async function putStream(key: string, source: Readable): Promise<void> {
   await fsp.rename(tmp, target);
 }
 
+/**
+ * 原子写入：先落同目录 .part 临时文件再 rename，崩溃时只会留下临时文件，
+ * 不会让读者看到写到一半的产物；重复执行（任务重试）结果等价。
+ */
 export async function putBuffer(key: string, data: Buffer): Promise<void> {
   const target = absOf(key);
   await fsp.mkdir(path.dirname(target), { recursive: true });
-  await fsp.writeFile(target, data);
+  const tmp = `${target}.part-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await fsp.writeFile(tmp, data);
+    await fsp.rename(tmp, target);
+  } catch (err) {
+    await fsp.rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
 }
 
 export function readStream(key: string, range?: { start: number; end: number }): Readable {

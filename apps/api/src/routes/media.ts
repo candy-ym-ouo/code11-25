@@ -80,6 +80,18 @@ mediaRouter.get(
   }),
 );
 
+mediaRouter.post(
+  '/:mediaId/reprocess',
+  requireFamily('family:read'),
+  writeLimiter,
+  asyncHandler(async (req, res) => {
+    const user = currentUser(req);
+    const ctx = familyCtx(req);
+    const result = await mediaService.reprocessMedia(user.id, ctx, req.params.mediaId!, clientMeta(req));
+    res.status(202).json(result);
+  }),
+);
+
 mediaRouter.patch(
   '/:mediaId',
   requireFamily('family:read'),

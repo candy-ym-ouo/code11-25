@@ -1,4 +1,5 @@
-import { api } from '../../api/client';
+import { useState } from 'react';
+import { api, ApiError } from '../../api/client';
 import { mediaSrc } from '../../lib/media';
 import { MEDIA_KIND_LABELS } from '../../lib/constants';
 import { formatBytes } from '../../lib/format';
@@ -19,6 +20,20 @@ export function MediaStrip({
   onChange: () => void;
 }) {
   const { push } = useToast();
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+
+  const reprocess = async (mediaId: string) => {
+    setRetryingId(mediaId);
+    try {
+      await api.post(`/families/${fid}/media/${mediaId}/reprocess`);
+      push('已重新加入处理队列，稍后自动刷新', 'success');
+      onChange();
+    } catch (err) {
+      push(err instanceof ApiError ? err.message : '重试失败', 'error');
+    } finally {
+      setRetryingId(null);
+    }
+  };
 
   if (media.length === 0) {
     return <p className="muted">还没有上传任何照片或录音。先保存条目，再回到详情页上传也可以。</p>;
@@ -44,6 +59,13 @@ export function MediaStrip({
             </span>
             {m.status === 'processing' ? <Tag tone="warn">处理中</Tag> : null}
             {m.status === 'failed' ? <Tag tone="warn">处理失败</Tag> : null}
+            {editable && (m.status === 'failed' || m.status === 'processing') ? (
+              <div className="media-tile__actions">
+                <Button size="sm" variant="ghost" loading={retryingId === m.id} onClick={() => reprocess(m.id)}>
+                  {m.status === 'failed' ? '重试处理' : '重新入队'}
+                </Button>
+              </div>
+            ) : null}
             {editable ? (
               <div className="media-tile__actions">
                 {m.kind === 'image' ? (
@@ -78,4 +100,3 @@ export function MediaStrip({
     </div>
   );
 }
-

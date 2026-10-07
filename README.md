@@ -245,6 +245,14 @@ curl -fsS http://127.0.0.1:4000/readyz    # 数据库 / 存储 / worker 就绪
 
 监控告警建议：`/readyz` 连续失败、磁盘剩余 < 15%、备份目录超过 24 小时没有出现新的 `DONE` 标记。
 
+### 后台任务可靠性
+
+缩略图、音频转码、导出 ZIP 都是数据库队列表（`jobs`）里的异步任务，保证：
+
+- **中断自愈**：进程被 `kill -9`、OOM 或断电后，任务不会永久停在「执行中」。worker 启动时及每 `WORKER_HEARTBEAT_MS` 巡检一次，把心跳超过 `WORKER_STALE_MS` 的 `running` 任务重新置回 `queued` 并清空 `started_at`，随后自动重跑。
+- **重复执行无副作用**：所有产物按内容寻址（sha256），重跑只是覆盖写同一份字节；图片/音频写入走「临时文件 + 原子 rename」，导出 ZIP 先写 `<jobId>.zip.part-<pid>` 再改名，任何时刻都不会读到半成品；同一家庭已有排队/执行中的导出任务时，重复点「开始导出」直接复用原任务。
+- **失败可重试**：任务失败按 1 分钟起、5 倍指数退避（上限 30 分钟）自动重试，超过 `maxAttempts` 才标记 `failed`；媒体处理失败时前端会显示「重试处理」按钮（`POST /api/v1/families/:fid/media/:id/reprocess`），导出失败可一键「重新导出」。
+
 ## 备份、恢复与升级
 
 ### 备份
@@ -320,6 +328,8 @@ API 进程每天也会自动跑一次同样的维护任务。
 | `FFMPEG_PATH` / `FFPROBE_PATH` | `ffmpeg` / `ffprobe` | ffmpeg 不在 PATH 里时给绝对路径 |
 | `TRASH_RETENTION_DAYS` | 30 | 回收站保留天数，到期由维护任务彻底删除 |
 | `WORKER_ENABLED` | `true` | 多实例部署时只让一个实例开启 |
+| `WORKER_STALE_MS` | `600000` | 执行中任务超过该时长无心跳即视为进程中断，自动重新入队 |
+| `WORKER_HEARTBEAT_MS` | `30000` | 心跳与僵尸任务巡检间隔，须明显小于 `WORKER_STALE_MS` |
 
 ## 目录结构
 

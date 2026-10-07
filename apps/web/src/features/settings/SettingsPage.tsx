@@ -75,10 +75,10 @@ export function SettingsPage() {
   });
 
   const startExport = useMutation({
-    mutationFn: () => api.post<{ jobId: string }>(`/families/${fid}/exports`),
+    mutationFn: () => api.post<{ jobId: string; deduplicated?: boolean }>(`/families/${fid}/exports`),
     onSuccess: (data) => {
       setJobId(data.jobId);
-      push('导出任务已开始，完成后可以直接下载', 'success');
+      push(data.deduplicated ? '已有进行中的导出任务，已直接复用' : '导出任务已开始，完成后可以直接下载', 'success');
     },
     onError: (err) => push(err instanceof ApiError ? err.message : '发起导出失败', 'error'),
   });
@@ -145,8 +145,13 @@ export function SettingsPage() {
       <section className="card">
         <div className="card__head">
           <h2>导出全部数据</h2>
-          <Button variant="primary" loading={startExport.isPending} onClick={() => startExport.mutate()}>
-            开始导出
+          <Button
+            variant="primary"
+            loading={startExport.isPending}
+            disabled={job?.status === 'queued' || job?.status === 'running'}
+            onClick={() => startExport.mutate()}
+          >
+            {job?.status === 'failed' ? '重新导出' : '开始导出'}
           </Button>
         </div>
         <p className="muted">
