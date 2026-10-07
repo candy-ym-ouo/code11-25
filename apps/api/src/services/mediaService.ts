@@ -195,6 +195,50 @@ export async function softDeleteMedia(userId: string, ctx: FamilyContext, mediaI
   });
 }
 
+/**
+ * 手动重试处理失败（或处理被中断）的媒体。
+ * 已有同类型 queued/running 任务时返回 409，避免重复执行；
+ * 重新执行是幂等的：产物按 sha256 内容寻址，重复转码只覆盖同名文件。
+ */
+export async function retryMediaProcessing(userId: string, ctx: FamilyContext, mediaId: string, meta: ActorMeta) {
+  const media = await loadMediaForUser(userId, ctx, mediaId);
+  const { access } = await itemWithAccess(userId, ctx, media.itemId);
+  if (!access.canManageMedia) throw new AppError('FORBIDDEN', '没有权限操作该媒体');
+  if (media.status === 'ready') throw conflict('该媒体已处理完成，无需重试');
+
+  const jobType = media.kind === 'audio' ? 'media_waveform' : 'media_thumbnail';
+  const open = await prisma.job.findMany({
+    where: { familyId: ctx.familyId, type: jobType, status: { in: ['queued', 'running'] } },
+    select: { id: true, payload: true },
+  });
+  const duplicate = open.some((j) => (j.payload as { mediaId?: unknown }).mediaId === mediaId);
+  if (duplicate) throw new AppError('CONFLICT', '该媒体已在处理队列中，请勿重复发起');
+
+  await prisma.$transaction(async (tx) => {
+    await tx.itemMedia.update({
+      where: { id: mediaId },
+      data: { status: 'processing', lastError: null },
+    });
+    await tx.job.create({
+      data: { familyId: ctx.familyId, type: jobType, payload: { mediaId } as never },
+    });
+    await audit.record(
+      {
+        familyId: ctx.familyId,
+        actorId: userId,
+        action: 'media.retry',
+        targetType: 'item',
+        targetId: media.itemId,
+        diff: { mediaId, kind: media.kind } as never,
+        ...meta,
+      },
+      tx,
+    );
+  });
+
+  return { mediaId, status: 'processing' };
+}
+
 export async function loadMediaForUser(userId: string, ctx: FamilyContext, mediaId: string): Promise<ItemMedia> {
   const media = await prisma.itemMedia.findFirst({
     where: { id: mediaId, deletedAt: null, item: { familyId: ctx.familyId, deletedAt: null } },

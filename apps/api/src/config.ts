@@ -52,6 +52,10 @@ const envSchema = z.object({
 
   WORKER_ENABLED: boolish(true),
   WORKER_POLL_MS: z.coerce.number().int().min(200).default(2000),
+  /** running 任务心跳超过该毫秒数即判定为进程中断（必须 > WORKER_HEARTBEAT_MS） */
+  WORKER_STALE_MS: z.coerce.number().int().min(30_000).default(120_000),
+  /** 执行长任务期间心跳刷新间隔 */
+  WORKER_HEARTBEAT_MS: z.coerce.number().int().min(5_000).default(15_000),
   TRASH_RETENTION_DAYS: z.coerce.number().int().min(1).default(30),
   EXPORT_RETENTION_DAYS: z.coerce.number().int().min(1).default(7),
 

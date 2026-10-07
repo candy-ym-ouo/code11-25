@@ -31,6 +31,18 @@ exportsRouter.get(
   }),
 );
 
+exportsRouter.post(
+  '/:jobId/retry',
+  requireFamily('family:export'),
+  writeLimiter,
+  asyncHandler(async (req, res) => {
+    const user = currentUser(req);
+    const ctx = familyCtx(req);
+    const job = await exportService.retryExportJob(user.id, ctx.familyId, req.params.jobId!, clientMeta(req));
+    res.status(202).json(job);
+  }),
+);
+
 exportsRouter.get(
   '/:jobId/download',
   requireFamily('family:export'),

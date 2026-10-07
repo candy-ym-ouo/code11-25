@@ -87,9 +87,12 @@ export function createApp() {
       checks.storage = 'fail';
     }
     try {
-      const lastJob = await prisma.job.findFirst({ orderBy: { updatedAt: 'desc' } });
-      const stuck = lastJob?.status === 'running' && Date.now() - lastJob.updatedAt.getTime() > 10 * 60_000;
-      checks.worker = config.WORKER_ENABLED ? (stuck ? 'stalled' : 'ok') : 'disabled';
+      // 存在心跳过旧的 running 任务，说明 worker 已中断（正常会被自动回收）
+      const staleRunning = await prisma.job.findFirst({
+        where: { status: 'running', lockedAt: { lt: new Date(Date.now() - config.WORKER_STALE_MS) } },
+        select: { id: true },
+      });
+      checks.worker = config.WORKER_ENABLED ? (staleRunning ? 'stalled' : 'ok') : 'disabled';
     } catch {
       checks.worker = 'fail';
     }

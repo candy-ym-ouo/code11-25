@@ -44,6 +44,23 @@ export function MediaStrip({
             </span>
             {m.status === 'processing' ? <Tag tone="warn">处理中</Tag> : null}
             {m.status === 'failed' ? <Tag tone="warn">处理失败</Tag> : null}
+            {editable && m.status === 'failed' ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={async () => {
+                  try {
+                    await api.post(`/families/${fid}/media/${m.id}/retry`, {});
+                    push('已重新加入处理队列', 'success');
+                    onChange();
+                  } catch (err) {
+                    push(err instanceof Error ? err.message : '重试失败', 'error');
+                  }
+                }}
+              >
+                重试处理
+              </Button>
+            ) : null}
             {editable ? (
               <div className="media-tile__actions">
                 {m.kind === 'image' ? (

@@ -303,6 +303,17 @@ pnpm gc   # 手动触发：清理过期回收站、回收孤儿文件、删除�
 
 API 进程每天也会自动跑一次同样的维护任务。
 
+### 任务中断自愈
+
+缩略图、音频转码、导出 ZIP 都是数据库队列表（`jobs`）里的后台任务。worker 领取任务后会持续刷新心跳（`jobs.locked_at`）：
+
+- 进程崩溃 / `kill -9` / 机器重启后，卡在 `running` 的任务会在 worker 下次启动时**无条件回收为排队**，随后自动重跑；
+- 运行期间另有 30 秒一次的巡检，心跳超过 `WORKER_STALE_MS`（默认 120 秒）的任务也会回收，无需重启；
+- 回收的那次执行不计入重试次数（`attempts` 减回），任务仍按原有的指数退避策略最多重试 `max_attempts`（默认 3）次；
+- 任务回写带执行代号围栏：旧进程“死后复活”（如事件循环卡死恢复）的迟到结果不会覆盖重跑后的新状态；
+- 重复执行没有副作用：媒体产物按 sha256 内容寻址（覆盖同名文件），导出 ZIP 先写 `*.zip.tmp-<次数>` 再原子 rename，任何时候下载到的都是完整包；
+- 自动重试用尽后任务落 `failed`：导出可在设置页点「重试导出」，媒体可在条目页点「重试处理」（接口分别为 `POST /exports/:jobId/retry`、`POST /media/:mediaId/retry`），重试会重置计数并重新排队。
+
 ## 配置项
 
 完整清单见 `.env.example`，常用的几项：
@@ -320,6 +331,8 @@ API 进程每天也会自动跑一次同样的维护任务。
 | `FFMPEG_PATH` / `FFPROBE_PATH` | `ffmpeg` / `ffprobe` | ffmpeg 不在 PATH 里时给绝对路径 |
 | `TRASH_RETENTION_DAYS` | 30 | 回收站保留天数，到期由维护任务彻底删除 |
 | `WORKER_ENABLED` | `true` | 多实例部署时只让一个实例开启 |
+| `WORKER_STALE_MS` | 120000 | running 任务心跳超过该毫秒数即判定进程中断并自动回收（须 > `WORKER_HEARTBEAT_MS`） |
+| `WORKER_HEARTBEAT_MS` | 15000 | 长任务执行期间 worker 心跳刷新间隔 |
 
 ## 目录结构
 

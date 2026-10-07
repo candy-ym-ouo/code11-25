@@ -410,10 +410,13 @@ model Job {
   runAfter    DateTime  @default(now()) @map("run_after")
   startedAt   DateTime? @map("started_at")
   finishedAt  DateTime? @map("finished_at")
+  // worker 心跳：领取时置位，执行期间定期刷新；心跳过旧的 running 任务视为中断并自动回收
+  lockedAt    DateTime? @map("locked_at")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
   @@index([status, runAfter])
+  @@index([status, lockedAt])
   @@map("jobs")
 }
 

@@ -4,10 +4,11 @@ import path from 'node:path';
 import archiver from 'archiver';
 import { CATEGORY_LABELS, ITEM_STATUS_LABELS, VISIBILITY_LABELS, formatAcquired, htmlToText } from '@heirloom/shared';
 import type { Job } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { config } from '../config';
 import { logger } from '../logger';
-import { notFound } from '../http/errors';
+import { AppError, notFound } from '../http/errors';
 import { absOf } from '../storage/local';
 import { slugify } from '../utils/crypto';
 import * as audit from './auditService';
@@ -62,6 +63,49 @@ export function exportZipPath(familyId: string, jobId: string): string {
   return path.join(config.EXPORT_ROOT, familyId, `${jobId}.zip`);
 }
 
+/**
+ * 重试失败（或被中断回收）的导出任务。
+ * 只有终态 done/failed 可重试：排队/执行中直接 409，避免重复执行；
+ * done 时已可下载，不需要重试。重置为全新一次排队，重复执行没有副作用
+ * （导出走临时文件 + 原子替换，产物覆盖同名 zip）。
+ */
+export async function retryExportJob(userId: string, familyId: string, jobId: string, meta: ActorMeta) {
+  const job = await prisma.$transaction(async (tx) => {
+    const found = await tx.job.findFirst({ where: { id: jobId, familyId, type: 'export_build' } });
+    if (!found) throw notFound('导出任务不存在');
+    if (found.status === 'queued' || found.status === 'running') {
+      throw new AppError('CONFLICT', '导出任务已在执行中，无需重复发起');
+    }
+    const reset = await tx.job.update({
+      where: { id: jobId },
+      data: {
+        status: 'queued',
+        attempts: 0,
+        progress: 0,
+        result: Prisma.JsonNull,
+        lastError: null,
+        runAfter: new Date(),
+        startedAt: null,
+        finishedAt: null,
+        lockedAt: null,
+      },
+    });
+    await audit.record(
+      {
+        familyId,
+        actorId: userId,
+        action: 'export.retry',
+        targetType: 'job',
+        targetId: jobId,
+        ...meta,
+      },
+      tx,
+    );
+    return reset;
+  });
+  return { jobId: job.id, status: job.status };
+}
+
 function csvCell(value: unknown): string {
   const s = value === null || value === undefined ? '' : String(value);
   return `"${s.replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
@@ -71,8 +115,15 @@ function csvCell(value: unknown): string {
  * 生成全量导出包。产物结构与项目文档 6.9 一致：
  * manifest.json + items.csv + items/*.md + media/原始文件 + media/index.csv，
  * 每份 media 都带 sha256，离线也能校验完整性。
+ *
+ * 中断安全：先写 <jobId>.tmp-<attempts>，全部写完后再原子 rename 成 <jobId>.zip。
+ * 因此任何时候下载到的 zip 都完整；进程中断只留下临时文件（由 storage_gc 清理），
+ * 任务被重新执行也不会污染上一次的结果。
  */
-export async function buildExportZip(job: Job): Promise<{ file: string; items: number; media: number; bytes: number }> {
+export async function buildExportZip(
+  job: Job,
+  onProgress?: (progress: number) => Promise<void>,
+): Promise<{ file: string; items: number; media: number; bytes: number }> {
   const familyId = job.familyId;
   if (!familyId) throw new Error('导出任务缺少 familyId');
 
@@ -88,9 +139,20 @@ export async function buildExportZip(job: Job): Promise<{ file: string; items: n
   });
 
   const outPath = exportZipPath(familyId, job.id);
+  // 每次执行独立临时名，重跑时不会和上一次中断的残留相互覆盖
+  const tmpPath = `${outPath}.tmp-${job.attempts}`;
   await fsp.mkdir(path.dirname(outPath), { recursive: true });
 
-  const output = fs.createWriteStream(outPath);
+  // 清理同任务往次执行留下的临时文件（正常情况下已被 rename 掉）
+  const tmpPrefix = path.basename(outPath); // <jobId>.zip
+  const dirEntries = await fsp.readdir(path.dirname(outPath)).catch(() => []);
+  for (const name of dirEntries) {
+    if (name.startsWith(`${tmpPrefix}.tmp-`) && name !== path.basename(tmpPath)) {
+      await fsp.rm(path.join(path.dirname(outPath), name), { force: true }).catch(() => undefined);
+    }
+  }
+
+  const output = fs.createWriteStream(tmpPath);
   const archive = archiver('zip', { zlib: { level: 6 } });
   const done = new Promise<void>((resolve, reject) => {
     output.on('close', () => resolve());
@@ -172,7 +234,7 @@ export async function buildExportZip(job: Job): Promise<{ file: string; items: n
 
     if (i % 25 === 0 || i === total - 1) {
       const progress = total === 0 ? 90 : Math.min(90, Math.round(((i + 1) / total) * 90));
-      await prisma.job.update({ where: { id: job.id }, data: { progress } }).catch(() => undefined);
+      await onProgress?.(progress);
     }
   }
 
@@ -216,8 +278,17 @@ export async function buildExportZip(job: Job): Promise<{ file: string; items: n
     { name: `${root}/manifest.json` },
   );
 
-  await archive.finalize();
-  await done;
+  try {
+    await archive.finalize();
+    await done;
+    // 原子替换：rename 在同一文件系统内是原子的，下载方不可能读到半成品 zip
+    await fsp.rename(tmpPath, outPath);
+  } catch (err) {
+    archive.destroy();
+    output.destroy();
+    await fsp.rm(tmpPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
 
   const stat = await fsp.stat(outPath);
   logger.info({ jobId: job.id, items: items.length, media: mediaTotal, bytes: stat.size }, '导出包生成完成');

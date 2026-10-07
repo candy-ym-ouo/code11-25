@@ -83,6 +83,17 @@ export function SettingsPage() {
     onError: (err) => push(err instanceof ApiError ? err.message : '发起导出失败', 'error'),
   });
 
+  // 失败（含进程中断后回收）的导出可以直接重试，后端保证重复执行无副作用
+  const retryExport = useMutation({
+    mutationFn: () => api.post<{ jobId: string }>(`/families/${fid}/exports/${jobId}/retry`),
+    onSuccess: (data) => {
+      setJobId(data.jobId);
+      void exportJob.refetch();
+      push('已重新加入导出队列', 'success');
+    },
+    onError: (err) => push(err instanceof ApiError ? err.message : '重试失败', 'error'),
+  });
+
   const revoke = useMutation({
     mutationFn: (linkId: string) => api.del(`/families/${fid}/share-links/${linkId}`),
     onSuccess: async () => {
@@ -170,6 +181,11 @@ export function SettingsPage() {
                   下载 ZIP
                   {job.result?.bytes ? `（${formatBytes(job.result.bytes)}）` : ''}
                 </a>
+              ) : null}
+              {job.status === 'failed' ? (
+                <Button size="sm" variant="primary" loading={retryExport.isPending} onClick={() => retryExport.mutate()}>
+                  重试导出
+                </Button>
               ) : null}
             </div>
             {job.lastError ? <p className="field__error">{job.lastError}</p> : null}
